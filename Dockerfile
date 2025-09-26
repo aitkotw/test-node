@@ -19,4 +19,4 @@ EXPOSE 3000
 # FIX: Replaced 'node' with the absolute path '/usr/local/bin/node'.
 # This is necessary because the enclave's minimal environment
 # often can't resolve executables using the system's PATH.
-CMD ["/usr/local/bin/node", "dist/index.js"]
+CMD ["/usr/local/bin/node", "/app/dist/index.js"]
