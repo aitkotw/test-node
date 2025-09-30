@@ -1,0 +1,22 @@
+{
+  "name": "enclave-service",
+  "image_name": "enclave-service:latest",
+  "cpu_count": 2,
+  "memory_mib": 2048,
+  "enable_debug_mode": true,
+  "vsock": {
+    "port": 3000,
+    "cid": 16
+  },
+  "docker_config": {
+    "repository": "enclave-service",
+    "tag": "latest",
+    "ports": {
+      "3000": 3000
+    }
+  },
+  "environment": {
+    "NODE_ENV": "production",
+    "PORT": "3000"
+  }
+}

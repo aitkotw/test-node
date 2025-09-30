@@ -1,7 +1,7 @@
 import express from 'express';
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json());
 
@@ -30,6 +30,8 @@ app.post('/api/enclave/compute', (req, res) => {
   });
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
+  console.log(`Server accessible on all interfaces (0.0.0.0:${PORT})`);
+  console.log(`Enclave environment: ${process.env.NODE_ENV || 'development'}`);
 });
