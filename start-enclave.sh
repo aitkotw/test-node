@@ -14,7 +14,7 @@ NC='\033[0m' # No Color
 
 # Configuration from enclave-config.json
 CPU_COUNT=2
-MEMORY_MIB=512
+MEMORY_MIB=2048
 EIF_PATH="./enclave-images/enclave-service.eif"
 ENCLAVE_NAME="enclave-service"
 
