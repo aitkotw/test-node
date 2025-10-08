@@ -57,20 +57,39 @@ function sendRequest(cid, request) {
 
       client.on('data', (buf) => {
         responseData += buf.toString();
-      });
 
-      client.on('end', () => {
-        try {
-          const response = JSON.parse(responseData);
-          resolve(response);
-        } catch (err) {
-          reject(new Error('Invalid JSON response: ' + responseData));
+        // Try to parse the response (ends with newline)
+        if (responseData.includes('\n')) {
+          try {
+            const response = JSON.parse(responseData.trim());
+            client.end();
+            resolve(response);
+          } catch (err) {
+            // Not valid JSON yet, wait for more data
+          }
         }
       });
 
-      // Send the request
+      client.on('end', () => {
+        if (responseData) {
+          try {
+            const response = JSON.parse(responseData.trim());
+            resolve(response);
+          } catch (err) {
+            reject(new Error('Invalid JSON response: ' + responseData));
+          }
+        }
+      });
+
+      client.on('close', () => {
+        // Connection closed without response
+        if (!responseData) {
+          reject(new Error('Connection closed without response'));
+        }
+      });
+
+      // Send the request (don't close immediately)
       client.writeTextSync(JSON.stringify(request));
-      client.end();
     });
   });
 }
