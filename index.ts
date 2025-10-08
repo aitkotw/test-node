@@ -1,7 +1,9 @@
 import express from 'express';
+import { EnclaveVsockServer } from './src/vsock-server';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const VSOCK_PORT = parseInt(process.env.VSOCK_PORT || '5000', 10);
 
 app.use(express.json());
 
@@ -30,6 +32,17 @@ app.post('/api/enclave/compute', (req, res) => {
   });
 });
 
+// Start HTTP server
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`[HTTP Server] Running on port ${PORT}`);
 });
+
+// Start vsock server for parent instance communication
+try {
+  const vsockServer = new EnclaveVsockServer(VSOCK_PORT);
+  vsockServer.listen();
+  console.log('[Enclave] Vsock server started successfully');
+} catch (err) {
+  console.error('[Enclave] Failed to start vsock server:', err);
+  console.error('[Enclave] This is expected if not running in an actual AWS Nitro Enclave');
+}

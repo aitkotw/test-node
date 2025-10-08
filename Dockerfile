@@ -1,84 +1,71 @@
+# ============================================================
+# AWS Nitro Enclave Node.js Application - Dockerfile
+# ============================================================
+# This Dockerfile creates an optimized image for running a
+# Node.js application inside an AWS Nitro Enclave with vsock
+# communication support.
+# ============================================================
+
 # ----------------------------------------------------
-# 1. BUILD STAGE (to install dependencies and build the app)
+# STAGE 1: BUILD
 # ----------------------------------------------------
-FROM public.ecr.aws/amazonlinux/amazonlinux:2023 AS builder
+FROM node:20-alpine AS builder
 
-# Clean DNF cache and update system
-RUN dnf clean all && \
-    dnf update -y --allowerasing
-
-# Install curl, build tools, and dependencies
-RUN dnf install -y --allowerasing curl gcc-c++ make || \
-    echo "Warning: Failed to install some dependencies. Check package conflicts."
-
-# Add NodeSource repository for Node.js 20
-RUN curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
-
-# Install Node.js
-RUN dnf install -y --allowerasing nodejs || \
-    echo "Warning: Node.js installation failed. Verify NodeSource repo compatibility."
-
-# Set working directory
 WORKDIR /app
 
-# Copy package.json and package-lock.json (if exists)
+# Copy package files
 COPY package*.json ./
 
-# Install dependencies
-RUN npm install
+# Install ALL dependencies (including devDependencies for TypeScript compilation)
+RUN npm ci
 
-# Copy the rest of the application code
+# Copy source code
 COPY . .
 
-# Build the app (assuming TypeScript or a build step; adjust if no build needed)
-RUN npm run build || \
-    echo "Warning: Build failed. Ensure 'build' script is defined in package.json."
+# Compile TypeScript to JavaScript
+RUN npm run build
 
 # ----------------------------------------------------
-# 2. PRODUCTION STAGE (final image)
+# STAGE 2: PRODUCTION
 # ----------------------------------------------------
-FROM public.ecr.aws/amazonlinux/amazonlinux:2023
+FROM node:20-alpine
 
-# Clean DNF cache and update system
-RUN dnf clean all && \
-    dnf update -y --allowerasing
+# Install dumb-init for proper signal handling in containers
+RUN apk add --no-cache dumb-init
 
-# Install curl for NodeSource setup
-RUN dnf install -y --allowerasing curl
-
-# Add NodeSource repository for Node.js 20
-RUN curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
-
-# Install Node.js
-RUN dnf install -y --allowerasing nodejs
-
-# Install aws-nitro-enclaves-vsock-proxy manually (since not in default repos)
-# Replace with the correct RPM URL for your region/architecture
-RUN curl -o /tmp/aws-nitro-enclaves-vsock-proxy.rpm \
-    https://aws-nitro-enclaves-cli.s3.amazonaws.com/latest/aws-nitro-enclaves-vsock-proxy.rpm && \
-    dnf install -y /tmp/aws-nitro-enclaves-vsock-proxy.rpm || \
-    echo "Warning: Failed to install aws-nitro-enclaves-vsock-proxy. Ensure Nitro Enclaves setup or remove if not needed."
-
-# Clean up
-RUN rm -f /tmp/aws-nitro-enclaves-vsock-proxy.rpm
-
-# Set working directory
 WORKDIR /app
 
-# Copy built files from builder stage
+# Copy package files
+COPY package*.json ./
+
+# Install ONLY production dependencies
+RUN npm ci --only=production && \
+    npm cache clean --force
+
+# Copy compiled application from builder stage
 COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/package*.json ./
 
-# Install only production dependencies
-RUN npm install --production
+# Environment variables
+ENV NODE_ENV=production \
+    PORT=3000 \
+    VSOCK_PORT=5000
 
-# Expose port for the app
+# Expose HTTP port (vsock is internal and doesn't need EXPOSE)
 EXPOSE 3000
 
-# Environment variables for port configuration
-ENV APP_PORT=3000
-ENV VSOCK_PORT=3000
+# Create non-root user for security
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nodejs -u 1001 && \
+    chown -R nodejs:nodejs /app
 
-# Command to run the app with vsock-proxy for Nitro Enclaves
-# Fallback to node if vsock-proxy is not installed
-CMD ["/bin/sh", "-c", "if [ -x /usr/bin/vsock-proxy ]; then vsock-proxy 0.0.0.0:${VSOCK_PORT} 127.0.0.1:${APP_PORT} -- /usr/bin/node /app/dist/index.js; else node /app/dist/index.js; fi"]
+# Switch to non-root user
+USER nodejs
+
+# Health check (optional - comment out if not needed)
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD node -e "require('http').get('http://localhost:3000/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"
+
+# Use dumb-init to handle signals properly
+# Use absolute path for node binary (required for Nitro Enclaves)
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["/usr/local/bin/node", "/app/dist/index.js"]

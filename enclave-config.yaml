@@ -1,0 +1,16 @@
+# AWS Nitro Enclave Configuration
+# This file defines the enclave's resource allocation
+
+# Memory allocated to the enclave (in MB)
+# Minimum: 64 MB
+# Recommended: 512 MB or more for Node.js applications
+memory_mib: 512
+
+# Number of vCPUs allocated to the enclave
+# Minimum: 2
+# Recommended: 2-4 for typical workloads
+cpu_count: 2
+
+# Enable debug mode (allows console access for troubleshooting)
+# Set to false for production
+debug_mode: true
