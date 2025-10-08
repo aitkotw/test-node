@@ -12,7 +12,7 @@ echo "========================================="
 # Configuration
 EIF_FILE="enclave-service.eif"
 ENCLAVE_CONFIG="enclave-config.yaml"
-MEMORY_MB=512
+MEMORY_MB=2048
 CPU_COUNT=2
 DEBUG_MODE="true"
 
