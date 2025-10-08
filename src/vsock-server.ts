@@ -34,26 +34,54 @@ export class EnclaveVsockServer {
   }
 
   private handleConnection(socket: VsockSocket): void {
+    let dataBuffer = '';
+
     socket.on('error', (err: Error) => {
       console.error('[Vsock Socket] Error:', err.message);
     });
 
     socket.on('data', (buf: Buffer) => {
+      // Accumulate data
+      dataBuffer += buf.toString();
+
       try {
-        const message = buf.toString();
-        console.log('[Vsock Server] Received:', message);
+        // Try to parse complete JSON
+        const request: VsockRequest = JSON.parse(dataBuffer);
+        console.log('[Vsock Server] Received:', JSON.stringify(request));
 
-        const request: VsockRequest = JSON.parse(message);
+        // Process request
         const response = this.processRequest(request);
+        const responseStr = JSON.stringify(response) + '\n';
 
-        socket.writeTextSync(JSON.stringify(response));
+        // Write response and close
+        console.log('[Vsock Server] Sending:', responseStr.trim());
+        socket.writeTextSync(responseStr);
+
+        // Give time for write to complete before closing
+        setTimeout(() => {
+          socket.end();
+        }, 10);
+
       } catch (err) {
+        // Not complete JSON yet, or error parsing
+        if (err instanceof SyntaxError && dataBuffer.length < 10000) {
+          // Wait for more data
+          return;
+        }
+
+        console.error('[Vsock Server] Parse error:', err);
         const errorResponse: VsockResponse = {
           success: false,
           error: err instanceof Error ? err.message : 'Unknown error',
           timestamp: new Date().toISOString()
         };
-        socket.writeTextSync(JSON.stringify(errorResponse));
+
+        try {
+          socket.writeTextSync(JSON.stringify(errorResponse) + '\n');
+          setTimeout(() => socket.end(), 10);
+        } catch (writeErr) {
+          console.error('[Vsock Server] Write failed:', writeErr);
+        }
       }
     });
 
