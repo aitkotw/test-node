@@ -18,10 +18,16 @@ FROM node:18-alpine AS builder
 WORKDIR /build
 
 # Copy enclave package files
-COPY enclave/package.json enclave/package-lock.json* ./
+COPY enclave/package.json ./
+COPY enclave/package-lock.json* ./
 
 # Install ALL dependencies (including devDependencies for TypeScript)
-RUN npm ci
+# Use npm install if package-lock.json doesn't exist, otherwise use npm ci
+RUN if [ -f package-lock.json ]; then \
+      npm ci; \
+    else \
+      npm install; \
+    fi
 
 # Copy enclave source code
 COPY enclave/ ./
@@ -40,10 +46,15 @@ RUN apk add --no-cache dumb-init
 WORKDIR /app
 
 # Copy enclave package files
-COPY enclave/package.json enclave/package-lock.json* ./
+COPY enclave/package.json ./
+COPY enclave/package-lock.json* ./
 
 # Install ONLY production dependencies
-RUN npm ci --only=production && \
+RUN if [ -f package-lock.json ]; then \
+      npm ci --only=production; \
+    else \
+      npm install --production; \
+    fi && \
     npm cache clean --force
 
 # Copy compiled application from builder stage
@@ -65,8 +76,8 @@ ENV NODE_ENV=production \
 EXPOSE 5000
 
 # Create non-root user for security
-RUN addgroup -g 1000 enclave && \
-    adduser -D -u 1000 -G enclave enclave && \
+RUN addgroup -g 1001 enclave && \
+    adduser -D -u 1001 -G enclave enclave && \
     chown -R enclave:enclave /app /opt/enclave
 
 # Switch to non-root user

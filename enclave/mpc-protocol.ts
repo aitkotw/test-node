@@ -146,11 +146,12 @@ export class MockMPCProtocol implements MPCProtocol {
       const fullPrivateKey = state.fullPrivateKey as Buffer;
 
       // Derive Ethereum address from private key
-      const wallet = new ethers.Wallet(fullPrivateKey);
+      const wallet = new ethers.Wallet('0x' + fullPrivateKey.toString('hex'));
       const address = wallet.address;
 
       // Get uncompressed public key (65 bytes: 0x04 + x + y)
-      const publicKey = Buffer.from(wallet.publicKey.slice(2), 'hex'); // Remove '0x' prefix
+      const signingKey = wallet.signingKey;
+      const publicKey = Buffer.from(signingKey.publicKey.slice(2), 'hex'); // Remove '0x' prefix
 
       // Mock: "Split" the private key (in reality, MPC never reconstructs full key)
       // Server keeps the full key as its "share" for mock purposes
@@ -236,7 +237,7 @@ export class MockMPCProtocol implements MPCProtocol {
       const messageHash = state.messageHash as Buffer;
 
       // Mock: Create a full signature using the server's "shard" (which is the full key in mock)
-      const wallet = new ethers.Wallet(serverShard);
+      const wallet = new ethers.Wallet('0x' + serverShard.toString('hex'));
       const signature = wallet.signingKey.sign(messageHash);
 
       // Mock: Split signature into server partial (we'll give full signature as "partial")
@@ -288,7 +289,7 @@ export class MockMPCProtocol implements MPCProtocol {
     // In reality: run a ZK proof protocol to verify client knows valid share
 
     // For mock: derive address from server shard and return it
-    const wallet = new ethers.Wallet(shardBuffer);
+    const wallet = new ethers.Wallet('0x' + shardBuffer.toString('hex'));
     const address = wallet.address;
 
     const sessionState: MPCSessionState = {
