@@ -1,27 +1,41 @@
 {
-  "name": "enclave-service",
+  "name": "mpc-parent-proxy",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Parent proxy for MPC enclave service - forwards client requests via vsock",
+  "main": "parent-proxy.js",
+  "type": "module",
   "scripts": {
-    "start": "nodemon index.ts",
-    "build": "tsc",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start:proxy": "node parent-proxy.js",
+    "start:enclave": "cd enclave && npm start",
+    "dev:proxy": "PROXY_PORT=3000 ENCLAVE_URL=http://127.0.0.1:5000 LOG_LEVEL=debug node parent-proxy.js",
+    "dev:enclave": "cd enclave && npm run dev",
+    "test:integration": "MOCK_MPC=true node test-integration.js",
+    "build": "cd enclave && npm run build"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/aitkotw/test-node.git"
   },
-  "keywords": [],
+  "keywords": [
+    "mpc",
+    "proxy",
+    "enclave",
+    "vsock",
+    "aws-nitro",
+    "threshold-signature"
+  ],
   "author": "",
   "license": "ISC",
-  "type": "commonjs",
   "bugs": {
     "url": "https://github.com/aitkotw/test-node/issues"
   },
   "homepage": "https://github.com/aitkotw/test-node#readme",
   "dependencies": {
     "express": "^5.1.0",
+    "axios": "^1.6.2",
+    "express-rate-limit": "^7.1.5",
+    "helmet": "^7.1.0",
+    "ethers": "^6.9.0",
     "node-vsock": "^0.0.5"
   },
   "devDependencies": {
@@ -30,5 +44,8 @@
     "nodemon": "^3.1.10",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }

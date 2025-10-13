@@ -141,3 +141,24 @@ vite.config.ts.timestamp-*
 # AWS Nitro Enclave files
 *.eif
 enclave-measurements.json
+
+# MPC Sealed Storage - NEVER COMMIT PRIVATE KEYS OR SHARDS
+/opt/enclave/sealed/
+sealed/
+*.shard
+*.meta.json
+backup.json
+*-backup.json
+
+# Certificates and keys
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~

@@ -1,0 +1,77 @@
+# .dockerignore for Enclave Docker Image
+#
+# Excludes unnecessary files from Docker build context
+# to reduce image size and build time
+
+# Node modules (will be installed in Docker)
+node_modules/
+
+# Build outputs
+dist/
+*.js.map
+*.tsbuildinfo
+
+# Development files
+*.log
+npm-debug.log*
+.npm
+
+# Tests
+*.test.ts
+*.spec.ts
+__tests__/
+test/
+coverage/
+
+# Documentation
+*.md
+docs/
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment files (never include in image)
+.env
+.env.*
+!.env.example
+
+# Sealed storage (should not be in source)
+sealed/
+*.shard
+*.meta.json
+
+# Enclave artifacts (built separately)
+*.eif
+*.docker
+enclave-pcr.json
+build-eif.sh
+run-enclave.sh
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Lock files (package-lock.json is kept, yarn.lock excluded)
+yarn.lock
+pnpm-lock.yaml
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.circleci/
+
+# Docker files (not needed in nested Docker build)
+Dockerfile*
+docker-compose.yml
+.dockerignore

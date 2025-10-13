@@ -1,0 +1,585 @@
+/**
+ * MPC-based Two-Party Signing Service - Enclave Server
+ *
+ * Runs inside AWS Nitro Enclave. Accepts requests via vsock-forwarded HTTP
+ * from parent-proxy.js on EC2 parent instance.
+ *
+ * SECURITY NOTES:
+ * - No external network egress from enclave
+ * - All Google OAuth and cloud backup operations performed client-side
+ * - Server shards sealed to enclave (file-based placeholder in dev)
+ * - Never log secrets, private keys, or share material
+ * - Use structured error responses (no stack traces in production)
+ *
+ * PRODUCTION TODOS:
+ * 1. Replace mock MPC with vetted GG20 implementation
+ * 2. Implement proper sealed storage (AWS Nitro SDK or KMS)
+ * 3. Add remote attestation verification before DKG
+ * 4. Implement rate limiting on signing endpoints
+ * 5. Add audit logging (non-secret events only) to parent-side sink
+ * 6. Implement replay protection (nonce tracking)
+ * 7. Add metrics and monitoring (latency, error rates)
+ * 8. Security audit by qualified cryptographers
+ */
+
+import express, { Request, Response, NextFunction } from 'express';
+import { createMPCProtocol, SessionManager } from './mpc-protocol.js';
+import { createKeyStore } from './keystore.js';
+import {
+  EnclaveConfig,
+  KeyStore,
+  MPCProtocol,
+  ErrorCode,
+  ErrorResponse,
+  BaseRequest,
+  CreateAccountStartRequest,
+  CreateAccountStepRequest,
+  SignStartRequest,
+  SignStepRequest,
+  GetPublicKeyRequest,
+  RecoverStartRequest,
+  RecoverStepRequest,
+  AccountMetadata,
+} from './types.js';
+import * as crypto from 'crypto';
+
+// ============================================================================
+// Configuration
+// ============================================================================
+
+const config: EnclaveConfig = {
+  port: parseInt(process.env.PORT || '5000', 10),
+  mockMode: process.env.MOCK_MPC === 'true',
+  sealedStoragePath: process.env.SEALED_STORAGE_PATH || '/opt/enclave/sealed',
+  sessionTimeoutMs: 300000, // 5 minutes
+  logLevel: (process.env.LOG_LEVEL as any) || 'info',
+};
+
+// ============================================================================
+// Initialize Components
+// ============================================================================
+
+const mpcProtocol: MPCProtocol = createMPCProtocol(config.mockMode);
+const sessionManager = new SessionManager();
+
+const keyStore: KeyStore = createKeyStore({
+  type: process.env.KEYSTORE_TYPE === 'memory' ? 'memory' : 'file',
+  basePath: config.sealedStoragePath,
+});
+
+// Initialize keystore (create directories, etc.)
+if ('initialize' in keyStore) {
+  await (keyStore as any).initialize();
+}
+
+// Periodic cleanup of expired sessions
+setInterval(() => {
+  sessionManager.cleanup();
+}, 60000); // Every minute
+
+// ============================================================================
+// Express App
+// ============================================================================
+
+const app = express();
+
+// Middleware
+app.use(express.json({ limit: '1mb' }));
+
+// Request logging (non-secret info only)
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    log('info', `${req.method} ${req.path} ${res.statusCode} ${duration}ms`);
+  });
+  next();
+});
+
+// ============================================================================
+// Error Handler
+// ============================================================================
+
+function sendError(
+  res: Response,
+  statusCode: number,
+  code: ErrorCode,
+  message: string,
+  requestId?: string,
+  details?: Record<string, unknown>
+): void {
+  const response: ErrorResponse = {
+    requestId,
+    error: {
+      code,
+      message,
+      details,
+    },
+  };
+
+  res.status(statusCode).json(response);
+}
+
+// ============================================================================
+// Health Endpoint
+// ============================================================================
+
+app.get('/v1/health', (req: Request, res: Response) => {
+  res.json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    mockMode: config.mockMode,
+  });
+});
+
+// ============================================================================
+// CreateAccount Endpoints - DKG
+// ============================================================================
+
+app.post('/v1/createAccount/start', async (req: Request, res: Response) => {
+  const body = req.body as CreateAccountStartRequest;
+  const { requestId, label, clientNodeId } = body;
+
+  try {
+    log('info', `Starting DKG for label=${label}`);
+
+    // Start DKG protocol
+    const { sessionState, serverMessage } = await mpcProtocol.startDKG();
+
+    // Store session
+    sessionManager.update(sessionState);
+
+    res.json({
+      requestId,
+      sessionId: sessionState.sessionId,
+      serverMessage: Buffer.from(serverMessage).toString('base64'),
+    });
+  } catch (err: any) {
+    log('error', `DKG start failed: ${err.message}`);
+    sendError(res, 500, 'MPC_ERROR', 'Failed to start key generation', requestId);
+  }
+});
+
+app.post('/v1/createAccount/step', async (req: Request, res: Response) => {
+  const body = req.body as CreateAccountStepRequest;
+  const { requestId, sessionId, clientMessage } = body;
+
+  try {
+    // Retrieve session
+    const sessionState = sessionManager.get(sessionId);
+    if (!sessionState) {
+      sendError(res, 400, 'INVALID_SESSION', 'Session not found or expired', requestId);
+      return;
+    }
+
+    if (sessionState.protocol !== 'DKG') {
+      sendError(res, 400, 'INVALID_SESSION', 'Session is not a DKG session', requestId);
+      return;
+    }
+
+    // Decode client message
+    const clientMsgBytes = Buffer.from(clientMessage, 'base64');
+
+    // Process DKG step
+    const result = await mpcProtocol.stepDKG(sessionState, clientMsgBytes);
+
+    // Update session
+    sessionManager.update(result.sessionState);
+
+    if (result.done && result.result) {
+      // DKG complete - persist server shard and metadata
+      const accountId = generateAccountId();
+
+      await keyStore.persistServerShard(accountId, result.result.serverShard);
+
+      const metadata: AccountMetadata = {
+        accountId,
+        address: result.result.address,
+        publicKey: Buffer.from(result.result.publicKey).toString('hex'),
+        label,
+        createdAt: new Date().toISOString(),
+      };
+
+      await keyStore.persistAccountMetadata(accountId, metadata);
+
+      // Clean up session
+      sessionManager.delete(sessionId);
+
+      log('info', `DKG complete: accountId=${accountId}, address=${result.result.address}`);
+
+      res.json({
+        requestId,
+        sessionId,
+        status: 'DONE',
+        accountId,
+        address: result.result.address,
+      });
+    } else {
+      // Continue with next round
+      res.json({
+        requestId,
+        sessionId,
+        status: 'CONTINUE',
+        serverMessage: result.serverMessage
+          ? Buffer.from(result.serverMessage).toString('base64')
+          : undefined,
+      });
+    }
+  } catch (err: any) {
+    log('error', `DKG step failed: ${err.message}`);
+
+    if (err.message.includes('KEYSTORE_ERROR')) {
+      sendError(res, 500, 'KEYSTORE_ERROR', 'Failed to persist account data', requestId);
+    } else {
+      sendError(res, 500, 'MPC_ERROR', 'DKG protocol error', requestId);
+    }
+  }
+});
+
+// ============================================================================
+// GetPublicKey Endpoint
+// ============================================================================
+
+app.post('/v1/getPublicKey', async (req: Request, res: Response) => {
+  const body = req.body as GetPublicKeyRequest;
+  const { requestId, accountId } = body;
+
+  try {
+    if (!accountId) {
+      sendError(res, 400, 'INVALID_REQUEST', 'accountId is required', requestId);
+      return;
+    }
+
+    const exists = await keyStore.has(accountId);
+    if (!exists) {
+      sendError(res, 404, 'ACCOUNT_NOT_FOUND', `Account ${accountId} not found`, requestId);
+      return;
+    }
+
+    const metadata = await keyStore.loadAccountMetadata(accountId);
+
+    res.json({
+      requestId,
+      accountId: metadata.accountId,
+      address: metadata.address,
+      publicKey: metadata.publicKey,
+    });
+  } catch (err: any) {
+    log('error', `getPublicKey failed: ${err.message}`);
+
+    if (err.message.includes('ACCOUNT_NOT_FOUND')) {
+      sendError(res, 404, 'ACCOUNT_NOT_FOUND', err.message, requestId);
+    } else {
+      sendError(res, 500, 'KEYSTORE_ERROR', 'Failed to retrieve account', requestId);
+    }
+  }
+});
+
+// ============================================================================
+// Sign Endpoints - MPC Signing
+// ============================================================================
+
+app.post('/v1/sign/start', async (req: Request, res: Response) => {
+  const body = req.body as SignStartRequest;
+  const { requestId, accountId, clientMessage } = body;
+
+  try {
+    if (!accountId) {
+      sendError(res, 400, 'INVALID_REQUEST', 'accountId is required', requestId);
+      return;
+    }
+
+    const exists = await keyStore.has(accountId);
+    if (!exists) {
+      sendError(res, 404, 'ACCOUNT_NOT_FOUND', `Account ${accountId} not found`, requestId);
+      return;
+    }
+
+    // Load server shard
+    const serverShard = await keyStore.loadServerShard(accountId);
+
+    // Client should send the message hash to sign in clientMessage
+    // For this mock, we'll accept it in the first message or generate a dummy one
+    let messageHash: Uint8Array;
+
+    if (clientMessage) {
+      const clientMsg = JSON.parse(Buffer.from(clientMessage, 'base64').toString('utf-8'));
+      messageHash = Buffer.from(clientMsg.messageHash, 'hex');
+    } else {
+      // If no message provided, this is an error (client should send hash)
+      sendError(res, 400, 'INVALID_REQUEST', 'clientMessage with messageHash required', requestId);
+      return;
+    }
+
+    // Start signing protocol
+    const { sessionState, serverMessage } = await mpcProtocol.startSign(serverShard, messageHash);
+
+    // Associate with accountId
+    sessionState.accountId = accountId;
+
+    sessionManager.update(sessionState);
+
+    log('info', `Signing started: accountId=${accountId}, sessionId=${sessionState.sessionId}`);
+
+    res.json({
+      requestId,
+      sessionId: sessionState.sessionId,
+      serverMessage: Buffer.from(serverMessage).toString('base64'),
+    });
+  } catch (err: any) {
+    log('error', `Sign start failed: ${err.message}`);
+
+    if (err.message.includes('ACCOUNT_NOT_FOUND')) {
+      sendError(res, 404, 'ACCOUNT_NOT_FOUND', err.message, requestId);
+    } else {
+      sendError(res, 500, 'MPC_ERROR', 'Failed to start signing', requestId);
+    }
+  }
+});
+
+app.post('/v1/sign/step', async (req: Request, res: Response) => {
+  const body = req.body as SignStepRequest;
+  const { requestId, sessionId, clientMessage } = body;
+
+  try {
+    const sessionState = sessionManager.get(sessionId);
+    if (!sessionState) {
+      sendError(res, 400, 'INVALID_SESSION', 'Session not found or expired', requestId);
+      return;
+    }
+
+    if (sessionState.protocol !== 'SIGN') {
+      sendError(res, 400, 'INVALID_SESSION', 'Session is not a signing session', requestId);
+      return;
+    }
+
+    const clientMsgBytes = Buffer.from(clientMessage, 'base64');
+
+    const result = await mpcProtocol.stepSign(sessionState, clientMsgBytes);
+
+    sessionManager.update(result.sessionState);
+
+    if (result.done && result.result) {
+      // Signing complete
+      sessionManager.delete(sessionId);
+
+      log('info', `Signing complete: accountId=${sessionState.accountId}, sessionId=${sessionId}`);
+
+      // Update last used timestamp
+      try {
+        const metadata = await keyStore.loadAccountMetadata(sessionState.accountId!);
+        metadata.lastUsedAt = new Date().toISOString();
+        await keyStore.persistAccountMetadata(sessionState.accountId!, metadata);
+      } catch {
+        // Non-critical, continue
+      }
+
+      res.json({
+        requestId,
+        sessionId,
+        status: 'DONE',
+        serverPartial: Buffer.from(result.result.serverPartial).toString('base64'),
+      });
+    } else {
+      res.json({
+        requestId,
+        sessionId,
+        status: 'CONTINUE',
+        serverMessage: result.serverMessage
+          ? Buffer.from(result.serverMessage).toString('base64')
+          : undefined,
+      });
+    }
+  } catch (err: any) {
+    log('error', `Sign step failed: ${err.message}`);
+    sendError(res, 500, 'SIGNING_ERROR', 'Signing protocol error', requestId);
+  }
+});
+
+// ============================================================================
+// Recovery Endpoints
+// ============================================================================
+
+app.post('/v1/recover/start', async (req: Request, res: Response) => {
+  const body = req.body as RecoverStartRequest;
+  const { requestId, accountId, clientMessage } = body;
+
+  try {
+    if (!accountId || !clientMessage) {
+      sendError(res, 400, 'INVALID_REQUEST', 'accountId and clientMessage required', requestId);
+      return;
+    }
+
+    const exists = await keyStore.has(accountId);
+    if (!exists) {
+      sendError(res, 404, 'ACCOUNT_NOT_FOUND', `Account ${accountId} not found`, requestId);
+      return;
+    }
+
+    // Load server shard
+    const serverShard = await keyStore.loadServerShard(accountId);
+    const clientMsgBytes = Buffer.from(clientMessage, 'base64');
+
+    // Start recovery protocol
+    const result = await mpcProtocol.startRecover(accountId, serverShard, clientMsgBytes);
+
+    if (result.done && result.result) {
+      if (result.result.verified) {
+        log('info', `Recovery successful: accountId=${accountId}`);
+
+        res.json({
+          requestId,
+          sessionId: result.sessionState.sessionId,
+          status: 'DONE',
+          address: result.result.address,
+        });
+      } else {
+        sendError(res, 400, 'RECOVERY_FAILED', 'Client shard verification failed', requestId);
+      }
+    } else {
+      // Multi-round recovery (if needed)
+      sessionManager.update(result.sessionState);
+
+      res.json({
+        requestId,
+        sessionId: result.sessionState.sessionId,
+        status: 'CONTINUE',
+        serverMessage: result.serverMessage
+          ? Buffer.from(result.serverMessage).toString('base64')
+          : undefined,
+      });
+    }
+  } catch (err: any) {
+    log('error', `Recovery start failed: ${err.message}`);
+
+    if (err.message.includes('ACCOUNT_NOT_FOUND')) {
+      sendError(res, 404, 'ACCOUNT_NOT_FOUND', err.message, requestId);
+    } else {
+      sendError(res, 500, 'RECOVERY_FAILED', 'Recovery protocol error', requestId);
+    }
+  }
+});
+
+app.post('/v1/recover/step', async (req: Request, res: Response) => {
+  const body = req.body as RecoverStepRequest;
+  const { requestId, sessionId, clientMessage } = body;
+
+  try {
+    const sessionState = sessionManager.get(sessionId);
+    if (!sessionState) {
+      sendError(res, 400, 'INVALID_SESSION', 'Session not found or expired', requestId);
+      return;
+    }
+
+    if (sessionState.protocol !== 'RECOVER') {
+      sendError(res, 400, 'INVALID_SESSION', 'Session is not a recovery session', requestId);
+      return;
+    }
+
+    const clientMsgBytes = Buffer.from(clientMessage, 'base64');
+
+    const result = await mpcProtocol.stepRecover(sessionState, clientMsgBytes);
+
+    if (result.done && result.result) {
+      sessionManager.delete(sessionId);
+
+      res.json({
+        requestId,
+        sessionId,
+        status: 'DONE',
+        address: result.result.address,
+      });
+    } else {
+      sessionManager.update(result.sessionState);
+
+      res.json({
+        requestId,
+        sessionId,
+        status: 'CONTINUE',
+        serverMessage: result.serverMessage
+          ? Buffer.from(result.serverMessage).toString('base64')
+          : undefined,
+      });
+    }
+  } catch (err: any) {
+    log('error', `Recovery step failed: ${err.message}`);
+    sendError(res, 500, 'RECOVERY_FAILED', 'Recovery protocol error', requestId);
+  }
+});
+
+// ============================================================================
+// Global Error Handler
+// ============================================================================
+
+app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+  log('error', `Unhandled error: ${err.message}`);
+  sendError(res, 500, 'INTERNAL_ERROR', 'Internal server error', undefined);
+});
+
+// ============================================================================
+// Start Server
+// ============================================================================
+
+app.listen(config.port, '0.0.0.0', () => {
+  log('info', `Enclave server listening on port ${config.port}`);
+  log('info', `Mock mode: ${config.mockMode}`);
+  log('info', `Sealed storage: ${config.sealedStoragePath}`);
+});
+
+// ============================================================================
+// Utilities
+// ============================================================================
+
+function generateAccountId(): string {
+  return `acct-${crypto.randomBytes(16).toString('hex')}`;
+}
+
+function log(level: string, message: string): void {
+  const levels = ['debug', 'info', 'warn', 'error'];
+  const configLevel = levels.indexOf(config.logLevel);
+  const msgLevel = levels.indexOf(level);
+
+  if (msgLevel >= configLevel) {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] [${level.toUpperCase()}] ${message}`);
+  }
+}
+
+/**
+ * PRODUCTION DEPLOYMENT CHECKLIST:
+ *
+ * 1. MPC Implementation:
+ *    - Replace MockMPCProtocol with vetted GG20 threshold ECDSA
+ *    - Audit CSPRNG usage and constant-time operations
+ *    - Implement proper abort mechanisms for invalid messages
+ *
+ * 2. Sealed Storage:
+ *    - Replace FileSealedKeyStore with AWS Nitro sealing or KMS
+ *    - Never use plaintext file storage in production
+ *    - Implement key rotation policies
+ *
+ * 3. Remote Attestation:
+ *    - Add attestation document generation endpoint
+ *    - Verify attestation before DKG (parent-proxy validates quote)
+ *    - Include PCR measurements in attestation
+ *
+ * 4. Rate Limiting & DoS Protection:
+ *    - Limit signing attempts per account per time window
+ *    - Implement request throttling
+ *    - Add CAPTCHA or proof-of-work for account creation
+ *
+ * 5. Audit Logging:
+ *    - Log all account creation, signing, and recovery events
+ *    - Send logs to parent-side audit sink (never log secrets)
+ *    - Include requestId in all log entries
+ *
+ * 6. Monitoring & Alerting:
+ *    - Track latency metrics (P50, P95, P99)
+ *    - Alert on high error rates or timeouts
+ *    - Monitor session pool size
+ *
+ * 7. Security Review:
+ *    - Conduct security audit by qualified cryptographers
+ *    - Penetration testing
+ *    - Review all error messages for information leakage
+ */
